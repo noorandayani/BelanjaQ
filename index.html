@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Catatan Keuangan</title>
+  <style>
+    body{font-family:system-ui,Arial; margin:0; background:#0b1220; color:#e8eefc;}
+    .wrap{max-width:720px; margin:0 auto; padding:16px;}
+    .card{background:#121b31; border:1px solid #233055; border-radius:14px; padding:14px; margin:12px 0;}
+    h1{font-size:18px; margin:8px 0 12px}
+    label{font-size:12px; opacity:.9}
+    input,select,button{width:100%; padding:12px; margin-top:6px; border-radius:12px; border:1px solid #2a3b6b; background:#0f1730; color:#e8eefc;}
+    button{background:#2f6bff; border:none; font-weight:700; cursor:pointer}
+    button:active{transform:scale(.99)}
+    .row{display:grid; grid-template-columns:1fr 1fr; gap:10px}
+    .muted{opacity:.8; font-size:12px}
+    .pill{display:inline-block; padding:6px 10px; border-radius:999px; border:1px solid #2a3b6b; margin-right:8px; font-size:12px}
+    .in{border-color:#2dd4bf}
+    .out{border-color:#fb7185}
+    .item{display:flex; justify-content:space-between; gap:10px; padding:10px 0; border-top:1px solid #233055}
+    .item:first-child{border-top:none}
+    .amt{font-weight:800}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>📒 Catatan Keuangan Harian</h1>
+
+    <div class="card">
+      <div class="muted">Koneksi</div>
+      <label>API URL (Web App Apps Script)</label>
+      <input id="apiUrl" placeholder="https://script.google.com/macros/s/....../exec" />
+      <label style="margin-top:10px; display:block;">Token</label>
+      <input id="token" placeholder="token rahasia" />
+      <button onclick="saveConfig()">Simpan Konfigurasi</button>
+      <div id="cfgMsg" class="muted" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="card">
+      <div class="muted">Tambah Transaksi</div>
+      <div class="row">
+        <div>
+          <label>Tanggal</label>
+          <input id="date" type="date" />
+        </div>
+        <div>
+          <label>Tipe</label>
+          <select id="type" onchange="refreshCategory()">
+            <option value="OUT">Pengeluaran</option>
+            <option value="IN">Pemasukan</option>
+          </select>
+        </div>
+      </div>
+
+      <label style="margin-top:10px; display:block;">Kategori</label>
+      <select id="category"></select>
+
+      <div class="row" style="margin-top:10px;">
+        <div>
+          <label>Jumlah</label>
+          <input id="amount" inputmode="numeric" placeholder="contoh: 15000" />
+        </div>
+        <div>
+          <label>Catatan</label>
+          <input id="note" placeholder="opsional" />
+        </div>
+      </div>
+
+      <button style="margin-top:12px;" onclick="addTx()">+ Simpan</button>
+      <div id="msg" class="muted" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+        <div>
+          <div class="muted">Ringkasan Bulan Ini</div>
+          <div id="summary" style="margin-top:6px;"></div>
+        </div>
+        <button style="width:auto; padding:10px 14px;" onclick="reloadAll()">Refresh</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="muted">Riwayat (terakhir 50)</div>
+      <div id="list"></div>
+    </div>
+  </div>
+
+<script>
+  // ====== CONFIG ======
+  const LS_KEY = "finance_app_cfg_v1";
+  function getCfg(){
+    try { return JSON.parse(localStorage.getItem(LS_KEY) || "{}"); }
+    catch(e){ return {}; }
+  }
+  function setCfg(cfg){
+    localStorage.setItem(LS_KEY, JSON.stringify(cfg));
+  }
+  function saveConfig(){
+    const apiUrl = document.getElementById("apiUrl").value.trim();
+    const token = document.getElementById("token").value.trim();
+    setCfg({ apiUrl, token });
+    document.getElementById("cfgMsg").textContent = "✅ Tersimpan.";
+    reloadAll();
+  }
+
+  // ====== API ======
+  async function apiGet(params){
+    const { apiUrl, token } = getCfg();
+    if(!apiUrl || !token) throw new Error("API URL / Token belum diset.");
+    const url = new URL(apiUrl);
+    Object.entries({ ...params, token }).forEach(([k,v]) => url.searchParams.set(k, v));
+    const res = await fetch(url.toString());
+    return res.json();
+  }
+  async function apiPost(action, body){
+    const { apiUrl, token } = getCfg();
+    if(!apiUrl || !token) throw new Error("API URL / Token belum diset.");
+    const url = new URL(apiUrl);
+    url.searchParams.set("action", action);
+    url.searchParams.set("token", token);
+    const res = await fetch(url.toString(), {
+      method: "POST",
+      headers: {"Content-Type":"text/plain;charset=utf-8"},
+      body: JSON.stringify(body)
+    });
+    return res.json();
+  }
+
+  // ====== UI LOGIC ======
+  let categories = { IN:[], OUT:[] };
+
+  function formatRp(n){
+    const x = Number(n||0);
+    return "Rp " + x.toLocaleString("id-ID");
+  }
+
+  function todayISO(){
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth()+1).padStart(2,"0");
+    const dd = String(d.getDate()).padStart(2,"0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  function monthISO(){
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth()+1).padStart(2,"0");
+    return `${yyyy}-${mm}`;
+  }
+
+  function refreshCategory(){
+    const type = document.getElementById("type").value;
+    const sel = document.getElementById("category");
+    sel.innerHTML = "";
+    (categories[type] || []).forEach(c => {
+      const opt = document.createElement("option");
+      opt.value = c; opt.textContent = c;
+      sel.appendChild(opt);
+    });
+    if(!sel.value){
+      const opt = document.createElement("option");
+      opt.value = ""; opt.textContent = "(belum ada kategori)";
+      sel.appendChild(opt);
+    }
+  }
+
+  async function loadCategories(){
+    const r = await apiGet({ action:"categories" });
+    if(!r.ok) throw new Error(r.error || "Gagal ambil kategori");
+    categories = r.categories;
+    refreshCategory();
+  }
+
+  async function loadSummary(){
+    const r = await apiGet({ action:"summary", month: monthISO() });
+    if(!r.ok) throw new Error(r.error || "Gagal ambil ringkasan");
+
+    const el = document.getElementById("summary");
+    el.innerHTML = `
+      <span class="pill in">IN: <b>${formatRp(r.income)}</b></span>
+      <span class="pill out">OUT: <b>${formatRp(r.expense)}</b></span>
+      <span class="pill">Saldo: <b>${formatRp(r.balance)}</b></span>
+    `;
+  }
+
+  function renderList(items){
+    const el = document.getElementById("list");
+    if(!items.length){
+      el.innerHTML = `<div class="muted" style="margin-top:8px;">Belum ada transaksi.</div>`;
+      return;
+    }
+    el.innerHTML = items.map(it => `
+      <div class="item">
+        <div>
+          <div style="font-weight:700">${it.category || "(tanpa kategori)"} <span class="muted">(${it.type})</span></div>
+          <div class="muted">${it.date} • ${it.note || ""}</div>
+        </div>
+        <div class="amt" style="color:${it.type==="IN" ? "#2dd4bf":"#fb7185"}">
+          ${it.type==="IN" ? "+" : "-"} ${formatRp(it.amount)}
+        </div>
+      </div>
+    `).join("");
+  }
+
+  async function loadList(){
+    const r = await apiGet({ action:"list", limit: 50 });
+    if(!r.ok) throw new Error(r.error || "Gagal ambil list");
+    renderList(r.items || []);
+  }
+
+  async function addTx(){
+    const msg = document.getElementById("msg");
+    msg.textContent = "";
+    try{
+      const date = document.getElementById("date").value || todayISO();
+      const type = document.getElementById("type").value;
+      const category = document.getElementById("category").value;
+      const amountRaw = document.getElementById("amount").value.trim();
+      const amount = Number(amountRaw.replace(/[^\d]/g,""));
+      const note = document.getElementById("note").value.trim();
+
+      const r = await apiPost("add", { date, type, category, amount, note, source:"mobile_web" });
+      if(!r.ok) throw new Error(r.error || "Gagal simpan");
+
+      msg.textContent = "✅ Tersimpan.";
+      document.getElementById("amount").value = "";
+      document.getElementById("note").value = "";
+
+      await reloadAll();
+    }catch(err){
+      msg.textContent = "❌ " + err.message;
+    }
+  }
+
+  async function reloadAll(){
+    try{
+      await loadCategories();
+      await loadSummary();
+      await loadList();
+    }catch(err){
+      document.getElementById("msg").textContent = "❌ " + err.message;
+    }
+  }
+
+  // init
+  (function init(){
+    const cfg = getCfg();
+    document.getElementById("apiUrl").value = cfg.apiUrl || "";
+    document.getElementById("token").value = cfg.token || "";
+    document.getElementById("date").value = todayISO();
+    if(cfg.apiUrl && cfg.token) reloadAll();
+  })();
+</script>
+</body>
+</html>
